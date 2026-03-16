@@ -77,18 +77,22 @@ class RAGSystem:
                 logger.error(f"Failed to clear directory: {e}")
 
     def load_and_index(self, batch_size=50):
-        """Loads documents and indexes them with improved persistence handling."""
+        """Loads documents and indexes them with manual directory handling."""
         if not os.path.exists(self.docs_dir):
             logger.error(f"Directory '{self.docs_dir}' not found.")
             return
 
-        self._clear_db()
+        # 1. Clear and Recreate Directory Manually
+        if os.path.exists(self.persist_dir):
+            try:
+                shutil.rmtree(self.persist_dir)
+                time.sleep(2)  # Give the OS time to release locks
+            except Exception as e:
+                logger.error(f"Error clearing DB: {e}")
 
-        # Ensure the directory exists before Chroma tries to use it
-        if not os.path.exists(self.persist_dir):
-            os.makedirs(self.persist_dir)
+        os.makedirs(self.persist_dir, exist_ok=True)
 
-
+        # 2. Document Loading
         loaders = {
             ".pdf": (PyPDFLoader, {}),
             ".txt": (TextLoader, {"encoding": "utf-8"}),
@@ -103,41 +107,29 @@ class RAGSystem:
                 logger.warning(f"Error loading {ext} files: {e}")
 
         if not docs:
-            logger.error("No documents found to index.")
+            logger.error("No documents found.")
             return
 
-        # Split documents into chunks
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         chunks = text_splitter.split_documents(docs)
 
-        # Indexing with Batching to avoid rate limits
-        # We initialize with the first batch to create the DB, then add the rest
+        # 3. Explicit Initialization
+        # Instead of from_documents, we initialize the object first
         try:
-            # Initialize an empty vectorstore first
             self.vectorstore = Chroma(
-                embedding_function=self.embeddings,
-                persist_directory=self.persist_dir
+                persist_directory=self.persist_dir,
+                embedding_function=self.embeddings
             )
 
-            # Add documents in batches
+            # Add in batches
             for i in range(0, len(chunks), batch_size):
                 batch = chunks[i: i + batch_size]
-                self.vectorstore.add_documents(batch)
-                logger.info(f"Indexed batch {i // batch_size + 1}")
-                time.sleep(1)
+                self.vectorstore.add_documents(documents=batch)
+                logger.info(f"Progress: {i + len(batch)}/{len(chunks)} chunks indexed.")
 
         except Exception as e:
-            logger.error(f"Failed to create vectorstore: {e}")
-            raise e
-
-        self._setup_retriever()
-
-        if len(chunks) > batch_size:
-            logger.info(f"Indexing remaining {len(chunks) - batch_size} chunks...")
-            for i in range(batch_size, len(chunks), batch_size):
-                batch = chunks[i: i + batch_size]
-                self.vectorstore.add_documents(batch)
-                time.sleep(2)  # Reduced sleep; adjust based on your API limits
+            logger.error(f"Chroma initialization failed: {e}")
+            return f"Error: {str(e)}"
 
         self._setup_retriever()
         logger.info("Indexing complete.")
