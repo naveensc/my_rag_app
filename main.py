@@ -77,12 +77,17 @@ class RAGSystem:
                 logger.error(f"Failed to clear directory: {e}")
 
     def load_and_index(self, batch_size=50):
-        """Loads documents and indexes them. Perfect for Streamlit's 'Refresh' button."""
+        """Loads documents and indexes them with improved persistence handling."""
         if not os.path.exists(self.docs_dir):
             logger.error(f"Directory '{self.docs_dir}' not found.")
             return
 
         self._clear_db()
+
+        # Ensure the directory exists before Chroma tries to use it
+        if not os.path.exists(self.persist_dir):
+            os.makedirs(self.persist_dir)
+
 
         loaders = {
             ".pdf": (PyPDFLoader, {}),
@@ -107,11 +112,25 @@ class RAGSystem:
 
         # Indexing with Batching to avoid rate limits
         # We initialize with the first batch to create the DB, then add the rest
-        self.vectorstore = Chroma.from_documents(
-            documents=chunks[:batch_size],
-            embedding=self.embeddings,
-            persist_directory=self.persist_dir
-        )
+        try:
+            # Initialize an empty vectorstore first
+            self.vectorstore = Chroma(
+                embedding_function=self.embeddings,
+                persist_directory=self.persist_dir
+            )
+
+            # Add documents in batches
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i: i + batch_size]
+                self.vectorstore.add_documents(batch)
+                logger.info(f"Indexed batch {i // batch_size + 1}")
+                time.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Failed to create vectorstore: {e}")
+            raise e
+
+        self._setup_retriever()
 
         if len(chunks) > batch_size:
             logger.info(f"Indexing remaining {len(chunks) - batch_size} chunks...")
